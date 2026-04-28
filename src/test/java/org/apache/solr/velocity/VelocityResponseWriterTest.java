@@ -16,9 +16,12 @@
  */
 package org.apache.solr.velocity;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.StringReader;
 import java.io.StringWriter;
+import java.lang.reflect.Method;
+import java.nio.charset.StandardCharsets;
 import java.security.AccessControlException;
 import java.util.Properties;
 
@@ -48,7 +51,7 @@ public class VelocityResponseWriterTest extends SolrTestCaseJ4 {
   @Override
   public void setUp() throws Exception {
     // This test case toggles the configset used from trusted to untrusted - return to default of trusted for each test
-    h.getCoreContainer().getCoreDescriptor(h.coreName).setConfigSetTrusted(true);
+    setConfigSetTrustedCompat(true);
     super.setUp();
   }
 
@@ -132,8 +135,8 @@ public class VelocityResponseWriterTest extends SolrTestCaseJ4 {
     assertEquals("0", h.query(req("q","*:*", "wt","velocity",VelocityResponseWriter.TEMPLATE,"numFound")));
 
     // Turn off trusted configset, which disables the Solr resource loader
-    h.getCoreContainer().getCoreDescriptor(h.coreName).setConfigSetTrusted(false);
-    assertFalse(h.getCoreContainer().getCoreDescriptor(coreName).isConfigSetTrusted());
+    setConfigSetTrustedCompat(false);
+    assertFalse(isConfigSetTrustedCompat());
 
     try {
       assertEquals("0", h.query(req("q","*:*", "wt","velocity",VelocityResponseWriter.TEMPLATE,"numFound")));
@@ -144,7 +147,7 @@ public class VelocityResponseWriterTest extends SolrTestCaseJ4 {
     }
 
     // set the harness back to the default of trusted
-    h.getCoreContainer().getCoreDescriptor(h.coreName).setConfigSetTrusted(true);
+    setConfigSetTrustedCompat(true);
   }
 
 
@@ -155,7 +158,7 @@ public class VelocityResponseWriterTest extends SolrTestCaseJ4 {
 
   @Test
   public void testEncoding() throws Exception {
-    assertEquals("éñçø∂îñg", h.query(req("q","*:*", "wt","velocity",VelocityResponseWriter.TEMPLATE,"encoding")));
+    assertEquals("\u00E9\u00F1\u00E7\u00F8\u2202\u00EE\u00F1g", h.query(req("q","*:*", "wt","velocity",VelocityResponseWriter.TEMPLATE,"encoding")));
   }
 
   @Test
@@ -242,5 +245,33 @@ public class VelocityResponseWriterTest extends SolrTestCaseJ4 {
         vrw.getContentType(req(VelocityResponseWriter.TEMPLATE, "numFound",
             VelocityResponseWriter.JSON,"wrf",
             VelocityResponseWriter.CONTENT_TYPE,"text/plain"), rsp));
+  }
+
+  @Test
+  public void testOutputStreamWriteForSolr10Contract() throws Exception {
+    VelocityResponseWriter vrw = new VelocityResponseWriter();
+    NamedList<String> nl = new NamedList<>();
+    vrw.init(nl);
+
+    SolrQueryRequest req = req("q", "*:*", "wt", "velocity",
+        VelocityResponseWriter.TEMPLATE, "encoding");
+    SolrQueryResponse rsp = new SolrQueryResponse();
+    ByteArrayOutputStream out = new ByteArrayOutputStream();
+
+    vrw.write(out, req, rsp, "text/html;charset=UTF-8");
+
+    assertEquals("\u00E9\u00F1\u00E7\u00F8\u2202\u00EE\u00F1g", out.toString(StandardCharsets.UTF_8.name()));
+  }
+
+  private void setConfigSetTrustedCompat(boolean trusted) throws Exception {
+    Method method = h.getCoreContainer().getCoreDescriptor(h.coreName).getClass()
+        .getMethod("setConfigSetTrusted", boolean.class);
+    method.invoke(h.getCoreContainer().getCoreDescriptor(h.coreName), trusted);
+  }
+
+  private boolean isConfigSetTrustedCompat() throws Exception {
+    Method method = h.getCoreContainer().getCoreDescriptor(h.coreName).getClass()
+        .getMethod("isConfigSetTrusted");
+    return (Boolean) method.invoke(h.getCoreContainer().getCoreDescriptor(h.coreName));
   }
 }

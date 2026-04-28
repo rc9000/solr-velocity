@@ -21,9 +21,15 @@ import java.io.FilePermission;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.io.OutputStream;
+import java.io.OutputStreamWriter;
 import java.io.StringWriter;
 import java.io.Writer;
 import java.lang.invoke.MethodHandles;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.nio.charset.Charset;
+import java.nio.charset.IllegalCharsetNameException;
 import java.nio.charset.StandardCharsets;
 import java.security.AccessControlContext;
 import java.security.AccessController;
@@ -45,7 +51,9 @@ import org.apache.solr.client.solrj.response.SolrResponseBase;
 import org.apache.solr.common.SolrException;
 import org.apache.solr.common.params.CommonParams;
 import org.apache.solr.common.util.NamedList;
+import org.apache.solr.core.CoreDescriptor;
 import org.apache.solr.core.SolrCore;
+import org.apache.solr.core.SolrResourceLoader;
 import org.apache.solr.request.SolrQueryRequest;
 import org.apache.solr.util.plugin.SolrCoreAware;
 import org.apache.velocity.Template;
@@ -111,6 +119,17 @@ public class VelocityResponseWriter implements QueryResponseWriter, SolrCoreAwar
     } catch (PrivilegedActionException e) {
       throw (IOException) e.getException();
     }
+  }
+
+  /**
+   * Solr 10 added an OutputStream-based QueryResponseWriter contract. Keep the existing text rendering
+   * path and adapt it here so the same jar remains usable across Solr 8/9/10.
+   */
+  public void write(OutputStream out, SolrQueryRequest request, SolrQueryResponse response, String contentType) throws IOException {
+    Charset charset = charsetFromContentType(contentType);
+    OutputStreamWriter writer = new OutputStreamWriter(out, charset);
+    write(writer, request, response);
+    writer.flush();
   }
 
   // sandbox for velocity code
@@ -180,6 +199,26 @@ public class VelocityResponseWriter implements QueryResponseWriter, SolrCoreAwar
     }
   }
 
+  private Charset charsetFromContentType(String contentType) {
+    if (contentType != null) {
+      String[] parts = contentType.split(";");
+      for (String part : parts) {
+        String trimmed = part.trim();
+        if (trimmed.regionMatches(true, 0, "charset=", 0, "charset=".length())) {
+          String charsetName = trimmed.substring("charset=".length()).trim();
+          if (!charsetName.isEmpty()) {
+            try {
+              return Charset.forName(charsetName);
+            } catch (IllegalCharsetNameException | java.nio.charset.UnsupportedCharsetException e) {
+              log.warn("Ignoring unsupported charset '{}' from content type '{}'", charsetName, contentType);
+            }
+          }
+        }
+      }
+    }
+    return StandardCharsets.UTF_8;
+  }
+
   private VelocityContext createContext(SolrQueryRequest request, SolrQueryResponse response) {
     VelocityContext context = new VelocityContext();
 
@@ -221,7 +260,7 @@ public class VelocityResponseWriter implements QueryResponseWriter, SolrCoreAwar
     // to bare bones SolrResponseBase.
     // Can this writer know what the handler class is?  With echoHandler=true it can get its string name at least
     SolrResponse rsp = new QueryResponse();
-    NamedList<Object> parsedResponse = BinaryResponseWriter.getParsedResponse(request, response);
+    NamedList<Object> parsedResponse = getParsedResponseCompat(request, response);
     try {
       rsp.setResponse(parsedResponse);
 
@@ -242,8 +281,7 @@ public class VelocityResponseWriter implements QueryResponseWriter, SolrCoreAwar
   }
 
   private VelocityEngine createEngine(SolrQueryRequest request) {
-
-    boolean trustedMode = request.getCore().getCoreDescriptor().isConfigSetTrusted();
+    boolean trustedMode = isTrustedConfigSet(request.getCore());
 
 
     VelocityEngine engine = new VelocityEngine();
@@ -318,6 +356,54 @@ public class VelocityResponseWriter implements QueryResponseWriter, SolrCoreAwar
     engine.init();
 
     return engine;
+  }
+
+  private boolean isTrustedConfigSet(SolrCore core) {
+    CoreDescriptor descriptor = core.getCoreDescriptor();
+    try {
+      Method legacyMethod = CoreDescriptor.class.getMethod("isConfigSetTrusted");
+      return (Boolean) legacyMethod.invoke(descriptor);
+    } catch (NoSuchMethodException e) {
+      return isTrustedConfigSetViaService(core);
+    } catch (IllegalAccessException | InvocationTargetException e) {
+      throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, "Unable to determine configset trust", e);
+    }
+  }
+
+  private boolean isTrustedConfigSetViaService(SolrCore core) {
+    Object container = core.getCoreContainer();
+    SolrResourceLoader loader = core.getSolrConfig().getResourceLoader();
+    try {
+      Method getConfigSetService = container.getClass().getMethod("getConfigSetService");
+      Object configSetService = getConfigSetService.invoke(container);
+      Method trustMethod = configSetService.getClass().getMethod("isConfigSetTrusted", SolrResourceLoader.class);
+      return (Boolean) trustMethod.invoke(configSetService, loader);
+    } catch (NoSuchMethodException e) {
+      // On very old Solr versions there was no separate ConfigSetService trust API.
+      return true;
+    } catch (IllegalAccessException | InvocationTargetException e) {
+      throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, "Unable to determine configset trust", e);
+    }
+  }
+
+  @SuppressWarnings("unchecked")
+  private NamedList<Object> getParsedResponseCompat(SolrQueryRequest request, SolrQueryResponse response) {
+    String[] classNames = {
+        "org.apache.solr.response.JavaBinResponseWriter",
+        "org.apache.solr.response.BinaryResponseWriter"
+    };
+    for (String className : classNames) {
+      try {
+        Class<?> writerClass = Class.forName(className);
+        Method method = writerClass.getMethod("getParsedResponse", SolrQueryRequest.class, SolrQueryResponse.class);
+        return (NamedList<Object>) method.invoke(null, request, response);
+      } catch (ClassNotFoundException e) {
+        // Try the next known response writer class name.
+      } catch (NoSuchMethodException | IllegalAccessException | InvocationTargetException e) {
+        throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, "Unable to parse Solr response via " + className, e);
+      }
+    }
+    throw new SolrException(SolrException.ErrorCode.SERVER_ERROR, "No compatible parsed response helper found");
   }
 
   private Template getTemplate(VelocityEngine engine, SolrQueryRequest request) throws IOException {
