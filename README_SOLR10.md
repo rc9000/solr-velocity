@@ -11,7 +11,6 @@ The plugin ran successfully in a local `/tmp` Solr 10 instance when started
 with:
 
 - `-Dsolr.config.lib.enabled=true`
-- `-Dsolr.solrj.http.cookies.enabled=false`
 - `-Dsolr.sharedLib=...`
 - `SOLR_SECURITY_MANAGER_ENABLED=false`
 
@@ -93,7 +92,7 @@ SOLR_SECURITY_MANAGER_ENABLED=false \
 /tmp/solr-10.0.0/bin/solr start -f --user-managed -p 8990 \
   --server-dir /tmp/solr-10.0.0/server \
   --solr-home /tmp/solr-velocity-run/home \
-  --jvm-opts '-Dsolr.logs.dir=/tmp/solr-velocity-run/logs -Dsolr.config.lib.enabled=true -Dsolr.solrj.http.cookies.enabled=false -Dsolr.sharedLib=/tmp/solr-velocity-run/lib'
+  --jvm-opts '-Dsolr.logs.dir=/tmp/solr-velocity-run/logs -Dsolr.config.lib.enabled=true -Dsolr.sharedLib=/tmp/solr-velocity-run/lib'
 ```
 
 ## Verify
